@@ -21,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 # ===================== S0ZLAMALAR =====================
 BOT_TOKEN = "7660014302:AAGvCgynFMB-y0Msy2_j9__4AjwJ4fGzqyY"
 ADMIN_ID = 6814831560
-WEBAPP_URL = "https://your-vercel-site.vercel.app"  # Web App (Vercel) URL manzilingiz
+WEBAPP_URL = "https://drshoqosimovawebapp.netlify.app/"  # Web App (Vercel) URL manzilingiz
 
 logging.basicConfig(level=logging.INFO)
 
