@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 pydantic
 requests
+aiogram==3.18.0
