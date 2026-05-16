@@ -18,10 +18,15 @@ from aiogram.types import (
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
-# ===================== S0ZLAMALAR =====================
+# ===================== SOZLAMALAR =====================
 BOT_TOKEN = "7660014302:AAGvCgynFMB-y0Msy2_j9__4AjwJ4fGzqyY"
 ADMIN_ID = 6814831560
-WEBAPP_URL = "https://drshoqosimovawebapp.netlify.app/"  # Web App (Vercel) URL manzilingiz
+
+# Sizning Netlify va ijtimoiy tarmoqlar uchun aniq havolalaringiz
+WEBAPP_URL = "https://drshoqosimovawebapp.netlify.app/"
+INSTAGRAM_URL = "https://www.instagram.com/dr_shoqosimova_klinika?igsh=MW1wbXhodWZ6MWo0Mg=="
+TELEGRAM_CH_URL = "https://t.me/shoqosimovaZumrad"
+GOOGLE_MAPS_URL = "http://maps.google.com/?q=Dr.+Shoqosimova+Klinikasi"  # Standart xarita qidiruv formati
 
 logging.basicConfig(level=logging.INFO)
 
@@ -157,28 +162,38 @@ async def lang_callback(callback: types.CallbackQuery):
 @dp.message(F.text.in_(["👨‍⚕️ Xizmatlar", "👨‍⚕️ Услуги"]))
 async def services_handler(message: types.Message):
     await message.answer("""
-👨‍⚕️ Bizning shifokorlar:
+👨‍⚕️ Bizning shifokorlar va xizmatlar:
 
-1. Dr. Shoqosimova — Pediatr, Terapevt, Zuluk
+1. Dr. Shoqosimova — Pediatr, Terapevt, Zuluk muolajasi
 2. Dr. Maryam — Zuluk terapiyasi, Masaj
-3. Dr. Muxlisa — Zuluk va Hijoma
-4. Dr. Ravshan — Zuluk terapiyasi (Erkaklar)
+3. Dr. Muxlisa — Zuluk va Hijoma mutaxassisi
+4. Dr. Ravshan — Zuluk terapiyasi (Erkaklar uchun)
 """)
 
 @dp.message(F.text.in_(["📞 Aloqa", "📞 Контакты"]))
 async def contact_handler(message: types.Message):
-    await message.answer("""
+    # Bu yerga Google Maps havolasi ham matnli ko'rinishda qo'shildi
+    await message.answer(f"""
 📞 Telefon: +998959508878
 🕒 Ish vaqti: 14:00 - 22:00
 ❌ Yakshanba — dam olish kuni
+
+📍 Bizning manzilimizni xaritadan ko'rish: {GOOGLE_MAPS_URL}
 """)
 
 @dp.message(F.text.in_(["🌐 Ijtimoiy tarmoqlar", "🌐 Соц сети"]))
 async def social_handler(message: types.Message):
+    # Ijtimoiy tarmoqlar va Google Maps manzili Inline tugmalarga joylandi
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Instagram", url="https://instagram.com")]
+        [
+            InlineKeyboardButton(text="📸 Instagram", url=INSTAGRAM_URL),
+            InlineKeyboardButton(text="📢 Telegram Kanal", url=TELEGRAM_CH_URL)
+        ],
+        [
+            InlineKeyboardButton(text="📍 Bizning manzil (Google Maps)", url=GOOGLE_MAPS_URL)
+        ]
     ])
-    await message.answer("Bizning sahifalar:", reply_markup=kb)
+    await message.answer("Klinikamizning rasmiy sahifalari va xaritadagi manzili:", reply_markup=kb)
 
 @dp.message(F.text.in_(["🇺🇿/🇷🇺 Tilni o'zgartirish", "🇺🇿/🇷🇺 Изменить язык"]))
 async def change_lang(message: types.Message):
