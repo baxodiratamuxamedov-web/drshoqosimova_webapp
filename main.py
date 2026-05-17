@@ -1,9 +1,10 @@
+import os
 import asyncio
 import logging
-import json
 import sqlite3
-import requests
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +19,10 @@ from aiogram.types import (
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
-BOT_TOKEN = "7660014302:AAGvCgynFMB-y0Msy2_j9__4AjwJ4fGzqyY"
-ADMIN_ID = 6814831560
+# --- SOZLAMALAR ---
+# Xavfsizlik uchun tokenlar Render muhitidan olinadi, agar topilmasa default qiymat ishlaydi
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7660014302:AAGvCgynFMB-y0Msy2_j9__4AjwJ4fGzqyY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 6814831560))
 
 WEBAPP_URL = "https://drshoqosimovawebapp.netlify.app/"
 INSTAGRAM_URL = "https://www.instagram.com/dr_shoqosimova_klinika?igsh=MW1wbXhodWZ6MWo0Mg=="
@@ -28,21 +31,11 @@ GOOGLE_MAPS_URL = "http://maps.google.com/?q=Dr.+Shoqosimova+Klinikasi"
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Dr. Shoqosimova Klinikasi API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
+# --- MA'LUMOTLAR BAZASI (SQLITE) ---
 conn = sqlite3.connect("clinic.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Jadvallarni yaratish va tekshirish
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
@@ -56,21 +49,24 @@ CREATE TABLE IF NOT EXISTS appointments(
     user_id INTEGER,
     name TEXT,
     phone TEXT,
-    age TEXT,
+    age TEXT DEFAULT 'Kiritilmadi',
     doctor TEXT,
     date TEXT,
     time TEXT,
-    issue TEXT,
+    issue TEXT DEFAULT 'Kiritilmadi',
     reminded INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
+# Mavjud bazada age va issue ustunlari borligini tekshirish (ustunlar yo'q bo'lsa qo'shish)
 cursor.execute("PRAGMA table_info(appointments)")
 columns = [col[1] for col in cursor.fetchall()]
 if "age" not in columns:
     cursor.execute("ALTER TABLE appointments ADD COLUMN age TEXT DEFAULT 'Kiritilmadi'")
-    conn.commit()
+if "issue" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN issue TEXT DEFAULT 'Kiritilmadi'")
+conn.commit()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vacations(
@@ -99,6 +95,74 @@ for doc, days, start, end in doctors_defaults:
     cursor.execute("INSERT OR IGNORE INTO doctor_schedules VALUES (?, ?, ?, ?)", (doc, days, start, end))
 conn.commit()
 
+
+# --- BOT VA DISPATCHER ---
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
+# --- TIMED REMINDER TASK (FONDAGI ESLATMA TIZIMI) ---
+async def reminder_scheduler():
+    while True:
+        try:
+            now = datetime.now()
+            target = now + timedelta(hours=1)
+            target_date = target.strftime("%Y-%m-%d")
+            target_time = target.strftime("%H:00")
+
+            cursor.execute("""
+                SELECT id, user_id, name, doctor, time 
+                FROM appointments 
+                WHERE date=? AND time=? AND reminded=0
+            """, (target_date, target_time))
+            
+            rows = cursor.fetchall()
+            for row in rows:
+                appt_id, user_id, name, doctor, tm = row
+                text = f"🔔 <b>ESLATMA!</b>\n\n{name}, bugun {tm} da {doctor} qabulingiz bor.\nVaqtni unutmaslikni so'raymiz! 🏥"
+                try:
+                    await bot.send_message(user_id, text, parse_mode="HTML")
+                    cursor.execute("UPDATE appointments SET reminded=1 WHERE id=?", (appt_id,))
+                    conn.commit()
+                except Exception as e:
+                    logging.error(f"Foydalanuvchiga eslatma yuborib bo'lmadi: {e}")
+        except Exception as e:
+            logging.error(f"Reminder xatosi: {e}")
+        
+        await asyncio.sleep(60)
+
+
+# --- FASTAPI LIFESPAN (KOD ISHGA TUSHGANDA VA TO'XTAGANDA) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Bot komandalari va fon topshiriqlarini ishga tushirish
+    commands = [BotCommand(command="start", description="Botni ishga tushirish")]
+    await bot.set_my_commands(commands)
+    
+    polling_task = asyncio.create_task(dp.start_polling(bot, skip_updates=True))
+    reminder_task = asyncio.create_task(reminder_scheduler())
+    logging.info("✅ Bot va Eslatuvchi tizim fonda muvaffaqiyatli ishga tushdi!")
+    
+    yield
+    
+    # Shutdown: Bot sessiyasini yopish va topshiriqlarni bekor qilish
+    polling_task.cancel()
+    reminder_task.cancel()
+    await bot.session.close()
+    logging.info("🛑 Tizim xavfsiz to'xtatildi.")
+
+app = FastAPI(title="Dr. Shoqosimova Klinikasi API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- PYDANTIC MODELLARI ---
 class BookingRequest(BaseModel):
     name: str
     phone: str
@@ -107,13 +171,15 @@ class BookingRequest(BaseModel):
     date: str
     time: str
     issue: str = "Kiritilmadi"
-    user_id: int = None
+    user_id: Optional[int] = None
     lang: str = "uz"
 
 class WebAppCancelRequest(BaseModel):
     appointment_id: int
     user_id: int
 
+
+# --- TILLAR LUG'ATI VA KLAVIATURALAR ---
 TEXTS = {
     "uz": {
         "welcome": "🏥 Dr. Shoqosimova klinikasiga xush kelibsiz!",
@@ -138,7 +204,7 @@ TEXTS = {
 }
 
 def main_kb(lang="uz"):
-    is_admin = lang == "admin"
+    is_admin = (lang == "admin")
     actual_lang = "uz" if is_admin else lang
     
     kb = [
@@ -176,6 +242,9 @@ class UserBookingState(StatesGroup):
     time = State()
     issue = State()
 
+
+# --- TELEGRAM BOT HANDLERLARI ---
+
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
@@ -199,7 +268,8 @@ async def lang_callback(callback: types.CallbackQuery):
 async def book_option_handler(message: types.Message):
     user_id = message.from_user.id
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-    lang = cursor.fetchone()[0] or "uz"
+    row = cursor.fetchone()
+    lang = row[0] if row else "uz"
     
     if lang == "uz":
         text = "Qabulga qanday yozilmoqchisiz?"
@@ -218,7 +288,8 @@ async def book_option_handler(message: types.Message):
 async def book_via_bot_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-    lang = cursor.fetchone()[0] or "uz"
+    row = cursor.fetchone()
+    lang = row[0] if row else "uz"
     await state.update_data(lang=lang)
     
     await callback.message.delete()
@@ -246,7 +317,7 @@ async def book_state_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
     await state.update_data(phone=phone)
     
-    text = "Yoshingizni kiriting (Masalan: 25 yoki 7 oylik):" if lang == "uz" else "Введите ваш возраст (Например: 25 yoki 7 месяцев):"
+    text = "Yoshingizni kiriting (Masalan: 25 yoki 7 oylik):" if lang == "uz" else "Введите ваш возраст (Например: 25 или 7 месяцев):"
     await message.answer(text, reply_markup=ReplyKeyboardRemove())
     await state.set_state(UserBookingState.age)
 
@@ -372,7 +443,8 @@ async def book_state_issue(message: types.Message, state: FSMContext):
 async def my_bookings_handler(message: types.Message):
     user_id = message.from_user.id
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-    lang = cursor.fetchone()[0] or "uz"
+    row = cursor.fetchone()
+    lang = row[0] if row else "uz"
     
     today = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("""
@@ -405,7 +477,8 @@ async def cancel_booking_callback(callback: types.CallbackQuery):
     appt_id = callback.data.split("_")[1]
     user_id = callback.from_user.id
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-    lang = cursor.fetchone()[0] or "uz"
+    row = cursor.fetchone()
+    lang = row[0] if row else "uz"
     
     cursor.execute("SELECT name, doctor, date, time, age FROM appointments WHERE id=?", (appt_id,))
     info = cursor.fetchone()
@@ -469,6 +542,9 @@ async def social_handler(message: types.Message):
 async def change_lang(message: types.Message):
     await message.answer("Tilni tanlang / Выберите язык:", reply_markup=lang_kb)
 
+
+# --- ADMIN KOMANDALARI ---
+
 @dp.message(F.text == "📊 Statistika")
 async def stats_handler(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
@@ -482,7 +558,7 @@ async def stats_handler(message: types.Message):
 async def broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     await message.answer(
-        "Rassilka xabarini yuboring.\n(Matn, Rasm yoki Videoli xabar yuborishingiz mumkin! Tegishli tugmalar saqlanib qoladi)", 
+        "Rassilka xabarini yuboring.\n(Matn, Rasm yoki Videoli xabar yuborishingiz mumkin!)", 
         reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(AdminState.broadcast_media)
@@ -528,7 +604,7 @@ async def edit_schedule_days(message: types.Message, state: FSMContext):
     await state.update_data(doctor=message.text)
     await message.answer(
         "Shifokorning ish kunlarini raqamlar bilan dushanbadan shanbagacha kiriting.\n"
-        "Masalan, Dushanbadan Jumabacha bo'lsa: 1,2,3,4,5 yozing. Har kuni bo'lsa: 1,2,3,4,5,6 kiriting:",
+        "Masalan: 1,2,3,4,5,6 (Dushanba-Shanba):",
         reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(AdminState.schedule_days)
@@ -537,7 +613,7 @@ async def edit_schedule_days(message: types.Message, state: FSMContext):
 async def edit_schedule_hours(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     await state.update_data(days=message.text)
-    await message.answer("Ish vaqti oralig'ini kiriting (Masalan: 14:00-20:00 yoki 09:00-18:00 ko'rinishida):")
+    await message.answer("Ish vaqti oralig'ini kiriting (Masalan: 14:00-22:00 ko'rinishida):")
     await state.set_state(AdminState.schedule_hours)
 
 @dp.message(AdminState.schedule_hours)
@@ -561,34 +637,8 @@ async def edit_schedule_save(message: types.Message, state: FSMContext):
         await message.answer("Xatolik! Vaqtni to'g'ri formatda kiriting (Masalan: 14:00-22:00)", reply_markup=main_kb("admin"))
     await state.clear()
 
-async def reminder_scheduler():
-    while True:
-        try:
-            now = datetime.now()
-            target = now + timedelta(hours=1)
-            target_date = target.strftime("%Y-%m-%d")
-            target_time = target.strftime("%H:00")
 
-            cursor.execute("""
-                SELECT id, user_id, name, doctor, time 
-                FROM appointments 
-                WHERE date=? AND time=? AND reminded=0
-            """, (target_date, target_time))
-            
-            rows = cursor.fetchall()
-            for row in rows:
-                appt_id, user_id, name, doctor, tm = row
-                text = f"🔔 ESLATMA!\n\n{name}, bugun {tm} da {doctor} qabuli bor.\nVaqtni unutmaslikni so'raymiz! 🏥"
-                try:
-                    await bot.send_message(user_id, text)
-                    cursor.execute("UPDATE appointments SET reminded=1 WHERE id=?", (appt_id,))
-                    conn.commit()
-                except:
-                    pass
-        except Exception as e:
-            logging.error(f"Reminder xatosi: {e}")
-        
-        await asyncio.sleep(60)
+# --- FASTAPI WEB API ENDPOINTLARI ---
 
 @app.get("/")
 async def root():
@@ -645,7 +695,7 @@ async def book_appointment(data: BookingRequest):
         cursor.execute("SELECT id FROM appointments WHERE doctor=? AND date=? AND time=?", 
                        (data.doctor, data.date, data.time))
         if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="Bu vaqt band")
+            raise HTTPException(status_code=400, detail="Bu vaqt allaqachon band qilingan")
 
         cursor.execute("""
             INSERT INTO appointments (user_id, name, phone, age, doctor, date, time, issue)
@@ -656,8 +706,8 @@ async def book_appointment(data: BookingRequest):
         report = f"🎯 <b>YANGI NAVBAT!</b>\n\n👤 Bemor: {data.name}\n📞 Telefon: {data.phone}\n🎂 Yoshi: {data.age}\n👨‍⚕️ Shifokor: {data.doctor}\n📅 Sana: {data.date}\n🕒 Vaqt: {data.time}\n🩺 Muammo: {data.issue}"
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Adminga xabar ketmadi: {e}")
 
         if data.user_id:
             if data.lang == "uz":
@@ -667,8 +717,8 @@ async def book_appointment(data: BookingRequest):
             
             try:
                 await bot.send_message(chat_id=data.user_id, text=user_msg, parse_mode="HTML")
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"Foydalanuvchiga tasdiqlash xabari ketmadi: {e}")
 
         return {"success": True, "message": "Navbat muvaffaqiyatli band qilindi!"}
     except Exception as e:
@@ -726,16 +776,3 @@ async def cancel_appointment_endpoint(data: WebAppCancelRequest):
         pass
         
     return {"success": True, "message": "Navbat bekor qilindi"}
-
-@app.on_event("startup")
-async def on_startup():
-    commands = [BotCommand(command="start", description="Botni ishga tushirish")]
-    await bot.set_my_commands(commands)
-    
-    asyncio.create_task(dp.start_polling(bot, skip_updates=True))
-    asyncio.create_task(reminder_scheduler())
-    print("✅ Bot va Eslatuvchi tizim fonda ishga tushdi!")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await bot.session.close()
