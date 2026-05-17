@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS appointments(
     user_id INTEGER,
     name TEXT,
     phone TEXT,
+    age TEXT,
     doctor TEXT,
     date TEXT,
     time TEXT,
@@ -64,6 +65,12 @@ CREATE TABLE IF NOT EXISTS appointments(
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )
 """)
+
+cursor.execute("PRAGMA table_info(appointments)")
+columns = [col[1] for col in cursor.fetchall()]
+if "age" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN age TEXT DEFAULT 'Kiritilmadi'")
+    conn.commit()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vacations(
@@ -95,12 +102,17 @@ conn.commit()
 class BookingRequest(BaseModel):
     name: str
     phone: str
+    age: str = "Kiritilmadi"
     doctor: str
     date: str
     time: str
     issue: str = "Kiritilmadi"
     user_id: int = None
     lang: str = "uz"
+
+class WebAppCancelRequest(BaseModel):
+    appointment_id: int
+    user_id: int
 
 TEXTS = {
     "uz": {
@@ -155,6 +167,15 @@ class AdminState(StatesGroup):
     schedule_days = State()
     schedule_hours = State()
 
+class UserBookingState(StatesGroup):
+    name = State()
+    phone = State()
+    age = State()
+    doctor = State()
+    date = State()
+    time = State()
+    issue = State()
+
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
@@ -174,6 +195,179 @@ async def lang_callback(callback: types.CallbackQuery):
     await callback.message.delete()
     await callback.message.answer(TEXTS[lang]["welcome"], reply_markup=main_kb(lang))
 
+@dp.message(F.text.in_(["📱 Onlayn Qabul", "📱 Онлайн запись"]))
+async def book_option_handler(message: types.Message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
+    lang = cursor.fetchone()[0] or "uz"
+    
+    if lang == "uz":
+        text = "Qabulga qanday yozilmoqchisiz?"
+        b1, b2 = "🌐 Sayt orqali (Web App)", "🤖 Bot orqali"
+    else:
+        text = "Как вы хотите записаться на прием?"
+        b1, b2 = "🌐 Через сайт (Web App)", "🤖 Через бот"
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=b1, web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(text=b2, callback_data="book_via_bot")]
+    ])
+    await message.answer(text, reply_markup=kb)
+
+@dp.callback_query(F.data == "book_via_bot")
+async def book_via_bot_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
+    lang = cursor.fetchone()[0] or "uz"
+    await state.update_data(lang=lang)
+    
+    await callback.message.delete()
+    text = "Ism va familiyangizni kiriting:" if lang == "uz" else "Введите ваше имя и фамилию:"
+    await callback.message.answer(text, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(UserBookingState.name)
+
+@dp.message(UserBookingState.name)
+async def book_state_name(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    await state.update_data(name=message.text)
+    
+    text = "Telefon raqamingizni kiriting yoki quyidagi tugmani bosing:" if lang == "uz" else "Введите номер телефона или нажмите кнопку:"
+    btn_text = "📞 Telefon raqamni yuborish" if lang == "uz" else "📞 Отправить номер"
+    
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=btn_text, request_contact=True)]], resize_keyboard=True)
+    await message.answer(text, reply_markup=kb)
+    await state.set_state(UserBookingState.phone)
+
+@dp.message(UserBookingState.phone)
+async def book_state_phone(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    phone = message.contact.phone_number if message.contact else message.text
+    await state.update_data(phone=phone)
+    
+    text = "Yoshingizni kiriting (Masalan: 25 yoki 7 oylik):" if lang == "uz" else "Введите ваш возраст (Например: 25 yoki 7 месяцев):"
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(UserBookingState.age)
+
+@dp.message(UserBookingState.age)
+async def book_state_age(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    await state.update_data(age=message.text)
+    
+    kb = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Dr. Shoqosimova"), KeyboardButton(text="Dr. Maryam")],
+        [KeyboardButton(text="Dr. Muxlisa"), KeyboardButton(text="Dr. Ravshan")]
+    ], resize_keyboard=True)
+    
+    text = "Shifokorni tanlang:" if lang == "uz" else "Выберите доктора:"
+    await message.answer(text, reply_markup=kb)
+    await state.set_state(UserBookingState.doctor)
+
+@dp.message(UserBookingState.doctor)
+async def book_state_doctor(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    await state.update_data(doctor=message.text)
+    
+    kb = ReplyKeyboardMarkup(keyboard=[[]], resize_keyboard=True)
+    for i in range(0, 5):
+        day = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+        kb.keyboard[0].append(KeyboardButton(text=day))
+        
+    text = "Sanani tanlang (Yil-Oy-Kun):" if lang == "uz" else "Выберите дату (Год-Месяц-День):"
+    await message.answer(text, reply_markup=kb)
+    await state.set_state(UserBookingState.date)
+
+@dp.message(UserBookingState.date)
+async def book_state_date(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    doctor = data["doctor"]
+    date_str = message.text
+    await state.update_data(date=date_str)
+    
+    cursor.execute("SELECT id FROM vacations WHERE doctor=? AND date=?", (doctor, date_str))
+    if cursor.fetchone():
+        text = "Ushbu sanada shifokor ta'tilda. Iltimos boshqa sana kiriting:" if lang == "uz" else "В эту дату врач не работает. Введите другую дату:"
+        await message.answer(text)
+        return
+
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        weekday = str(dt.isoweekday())
+    except:
+        text = "Sana xato. Format: YYYY-MM-DD"
+        await message.answer(text)
+        return
+
+    cursor.execute("SELECT work_days, start_time, end_time FROM doctor_schedules WHERE doctor=?", (doctor,))
+    schedule = cursor.fetchone()
+    if not schedule or weekday not in schedule[0].split(","):
+        text = "Bu kuni shifokor ishlamaydi. Boshqa sana tanlang:" if lang == "uz" else "В этот день врач не работает. Выберите другую дату:"
+        await message.answer(text)
+        return
+        
+    start_hour = int(schedule[1].split(":")[0])
+    end_hour = int(schedule[2].split(":")[0])
+    all_slots = [f"{hour}:00" for hour in range(start_hour, end_hour)]
+    
+    cursor.execute("SELECT time FROM appointments WHERE doctor=? AND date=?", (doctor, date_str))
+    booked = [row[0] for row in cursor.fetchall()]
+    available = [slot for slot in all_slots if slot not in booked]
+    
+    if not available:
+        text = "Bu kungi barcha soatlar band. Boshqa sana tanlang:" if lang == "uz" else "Все часы заняты. Выберите другую дату:"
+        await message.answer(text)
+        return
+        
+    kb = ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+    row = []
+    for slot in available:
+        row.append(KeyboardButton(text=slot))
+        if len(row) == 4:
+            kb.keyboard.append(row)
+            row = []
+    if row:
+        kb.keyboard.append(row)
+        
+    text = "Vaqtni tanlang:" if lang == "uz" else "Выберите время:"
+    await message.answer(text, reply_markup=kb)
+    await state.set_state(UserBookingState.time)
+
+@dp.message(UserBookingState.time)
+async def book_state_time(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data["lang"]
+    await state.update_data(time=message.text)
+    
+    text = "Sizni nima bezovta qilyapti? (Muammoni qisqacha yozing):" if lang == "uz" else "Что вас беспокоит? (Опишите проблему кратко):"
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(UserBookingState.issue)
+
+@dp.message(UserBookingState.issue)
+async def book_state_issue(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await state.update_data(issue=message.text)
+    data = await state.get_data()
+    lang = data["lang"]
+    
+    cursor.execute("""
+        INSERT INTO appointments (user_id, name, phone, age, doctor, date, time, issue)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, data["name"], data["phone"], data["age"], data["doctor"], data["date"], data["time"], data["issue"]))
+    conn.commit()
+    
+    report = f"🎯 <b>YANGI NAVBAT (BOTDAN)!</b>\n\n👤 Bemor: {data['name']}\n📞 Telefon: {data['phone']}\n🎂 Yoshi: {data['age']}\n👨‍⚕️ Shifokor: {data['doctor']}\n📅 Sana: {data['date']}\n🕒 Vaqt: {data['time']}\n🩺 Muammo: {data['issue']}"
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
+    except:
+        pass
+        
+    await message.answer(TEXTS[lang]["success"], reply_markup=main_kb(lang))
+    await state.clear()
+
 @dp.message(F.text.in_(["📅 Mening navbatlarim", "📅 Мои записи"]))
 async def my_bookings_handler(message: types.Message):
     user_id = message.from_user.id
@@ -182,7 +376,7 @@ async def my_bookings_handler(message: types.Message):
     
     today = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("""
-        SELECT id, doctor, date, time FROM appointments 
+        SELECT id, doctor, date, time, age FROM appointments 
         WHERE user_id=? AND date >= ? ORDER BY date ASC, time ASC
     """, (user_id, today))
     rows = cursor.fetchall()
@@ -193,12 +387,12 @@ async def my_bookings_handler(message: types.Message):
         return
         
     for row in rows:
-        appt_id, doctor, date, time = row
+        appt_id, doctor, date, time, age = row
         if lang == "uz":
-            text = f"📋 <b>Navbat ma'lumoti:</b>\n\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}"
+            text = f"📋 <b>Navbat ma'lumoti:</b>\n\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}\n🎂 Yoshi: {age}"
             btn_text = "❌ Navbatni bekor qilish"
         else:
-            text = f"📋 <b>Информация о записи:</b>\n\n👨‍⚕️ Доктор: {doctor}\n📅 Дата: {date}\n🕒 Время: {time}"
+            text = f"📋 <b>Информация о записи:</b>\n\n👨‍⚕️ Доктор: {doctor}\n📅 Дата: {date}\n🕒 Время: {time}\n🎂 Возраст: {age}"
             btn_text = "❌ Отменить запись"
             
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -213,7 +407,7 @@ async def cancel_booking_callback(callback: types.CallbackQuery):
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
     lang = cursor.fetchone()[0] or "uz"
     
-    cursor.execute("SELECT name, doctor, date, time FROM appointments WHERE id=?", (appt_id,))
+    cursor.execute("SELECT name, doctor, date, time, age FROM appointments WHERE id=?", (appt_id,))
     info = cursor.fetchone()
     
     cursor.execute("DELETE FROM appointments WHERE id=?", (appt_id,))
@@ -224,12 +418,18 @@ async def cancel_booking_callback(callback: types.CallbackQuery):
     await callback.answer(success_msg, show_alert=True)
     
     if info:
-        name, doctor, date, time = info
+        name, doctor, date, time, age = info
         await bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"⚠️ <b>NAVBAT BEKOR QILINDI!</b>\n\n👤 Bemor: {name}\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}",
+            text=f"⚠️ <b>NAVBAT BEKOR QILINDI (BOTDAN)!</b>\n\n👤 Bemor: {name}\n🎂 Yoshi: {age}\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}",
             parse_mode="HTML"
         )
+        
+        user_cancel_msg = f"❌ <b>Sizning navbatingiz bekor qilindi!</b>\n\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}" if lang == "uz" else f"❌ <b>Ваша запись отменена!</b>\n\n👨‍⚕️ Доктор: {doctor}\n📅 Дата: {date}\n🕒 Время: {time}"
+        try:
+            await bot.send_message(chat_id=user_id, text=user_cancel_msg, parse_mode="HTML")
+        except:
+            pass
 
 @dp.message(F.text.in_(["👨‍⚕️ Xizmatlar", "👨‍⚕️ Услуги"]))
 async def services_handler(message: types.Message):
@@ -448,20 +648,84 @@ async def book_appointment(data: BookingRequest):
             raise HTTPException(status_code=400, detail="Bu vaqt band")
 
         cursor.execute("""
-            INSERT INTO appointments (user_id, name, phone, doctor, date, time, issue)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (data.user_id, data.name, data.phone, data.doctor, data.date, data.time, data.issue))
+            INSERT INTO appointments (user_id, name, phone, age, doctor, date, time, issue)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (data.user_id, data.name, data.phone, data.age, data.doctor, data.date, data.time, data.issue))
         conn.commit()
 
-        report = f"🎯 <b>YANGI NAVBAT!</b>\n\n👤 Bemor: {data.name}\n📞 Telefon: {data.phone}\n👨‍⚕️ Shifokor: {data.doctor}\n📅 Sana: {data.date}\n🕒 Vaqt: {data.time}\n🩺 Muammo: {data.issue}"
+        report = f"🎯 <b>YANGI NAVBAT!</b>\n\n👤 Bemor: {data.name}\n📞 Telefon: {data.phone}\n🎂 Yoshi: {data.age}\n👨‍⚕️ Shifokor: {data.doctor}\n📅 Sana: {data.date}\n🕒 Vaqt: {data.time}\n🩺 Muammo: {data.issue}"
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
         except:
             pass
 
+        if data.user_id:
+            if data.lang == "uz":
+                user_msg = f"🏥 <b>Siz muvaffaqiyatli qabulga yozildingiz!</b>\n\n👨‍⚕️ Shifokor: {data.doctor}\n📅 Sana: {data.date}\n🕒 Vaqt: {data.time}\n\nKlinikamizga o'z vaqtida kelishingizni so'raymiz."
+            else:
+                user_msg = f"🏥 <b>Вы успешно записались на прием!</b>\n\n👨‍⚕️ Доктор: {data.doctor}\n📅 Дата: {data.date}\n🕒 Время: {data.time}\n\nПожалуйста, приходите вовремя."
+            
+            try:
+                await bot.send_message(chat_id=data.user_id, text=user_msg, parse_mode="HTML")
+            except:
+                pass
+
         return {"success": True, "message": "Navbat muvaffaqiyatli band qilindi!"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/my-appointments")
+async def get_my_appointments(user_id: int):
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("""
+        SELECT id, name, phone, doctor, date, time, issue, age FROM appointments 
+        WHERE user_id=? AND date >= ? ORDER BY date ASC, time ASC
+    """, (user_id, today))
+    rows = cursor.fetchall()
+    
+    appointments = []
+    for row in rows:
+        appointments.append({
+            "id": row[0],
+            "name": row[1],
+            "phone": row[2],
+            "doctor": row[3],
+            "date": row[4],
+            "time": row[5],
+            "issue": row[6],
+            "age": row[7]
+        })
+    return appointments
+
+@app.post("/cancel-appointment")
+async def cancel_appointment_endpoint(data: WebAppCancelRequest):
+    cursor.execute("SELECT name, doctor, date, time, age FROM appointments WHERE id=? AND user_id=?", (data.appointment_id, data.user_id))
+    info = cursor.fetchone()
+    
+    if not info:
+        raise HTTPException(status_code=404, detail="Navbat topilmadi yoki sizga tegishli emas")
+        
+    cursor.execute("DELETE FROM appointments WHERE id=? AND user_id=?", (data.appointment_id, data.user_id))
+    conn.commit()
+    
+    name, doctor, date, time, age = info
+    report = f"⚠️ <b>NAVBAT BEKOR QILINDI (WEB APP'DAN)!</b>\n\n👤 Bemor: {name}\n🎂 Yoshi: {age}\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}"
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
+    except:
+        pass
+
+    cursor.execute("SELECT lang FROM users WHERE user_id=?", (data.user_id,))
+    user_lang_row = cursor.fetchone()
+    lang = user_lang_row[0] if user_lang_row else "uz"
+
+    user_cancel_msg = f"❌ <b>Sizning navbatingiz bekor qilindi (Sayt orqali)!</b>\n\n👨‍⚕️ Shifokor: {doctor}\n📅 Sana: {date}\n🕒 Vaqt: {time}" if lang == "uz" else f"❌ <b>Ваша запись отменена (через Сайт)!</b>\n\n👨‍⚕️ Доктор: {doctor}\n📅 Дата: {date}\n🕒 Время: {time}"
+    try:
+        await bot.send_message(chat_id=data.user_id, text=user_cancel_msg, parse_mode="HTML")
+    except:
+        pass
+        
+    return {"success": True, "message": "Navbat bekor qilindi"}
 
 @app.on_event("startup")
 async def on_startup():
